@@ -1,9 +1,9 @@
 class Junie < Formula
   desc "Junie CLI"
   homepage "https://www.jetbrains.com/junie"
-  url "https://github.com/JetBrains/junie/releases/download/1966.53/junie-release-1966.53-macos-aarch64.zip"
-  sha256 "f9a2f56a6686c44dd229e77238ca549df459064ecdc904ef6cdcce272f6fa956"
-  version "1966.53"
+  url "https://github.com/JetBrains/junie/releases/download/1966.57/junie-release-1966.57-macos-aarch64.zip"
+  sha256 "381de43bddadfc542c9a79043184c0610ad1df049c8f8d93025f39750d862b75"
+  version "1966.57"
   license "https://jb.gg/junie-tos-eap"
 
   def install

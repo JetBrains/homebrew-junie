@@ -1,9 +1,9 @@
 class Junie < Formula
   desc "Junie CLI"
   homepage "https://www.jetbrains.com/junie"
-  url "https://github.com/JetBrains/junie/releases/download/2285.5/junie-release-2285.5-macos-aarch64.zip"
-  sha256 "c8a0aad19714938e8e2e0989e74b0c4b9b353c96a459de3722cecd76a71b2e99"
-  version "2285.5"
+  url "https://github.com/JetBrains/junie/releases/download/2383.9/junie-release-2383.9-macos-aarch64.zip"
+  sha256 "dd9ca5b40a9339cb7e1cd62c55f0b159f1e973527af1a5cfa98f4ecbbc8edbfb"
+  version "2383.9"
   license "https://jb.gg/junie-tos-eap"
 
   def install
@@ -276,7 +276,8 @@ SHIM_EOF
           return 0
         fi
       
-        log_both "Applying pending update (manifest=$PENDING_UPDATE)"
+        log_both "Applying staged update..."
+        log_upgrade "manifest=$PENDING_UPDATE"
       
         # Parse manifest
         local version zip_path sha256
@@ -357,7 +358,7 @@ SHIM_EOF
         fi
         log_upgrade "staging: created '$staging'"
       
-        log_both "Extracting to $staging..."
+        log_both "Extracting update..."
         log_upgrade "extract: starting tool='$extractor' src='$zip_path' dst='$staging'"
       
         if [[ "$extractor" == "unzip" ]]; then
@@ -454,7 +455,7 @@ SHIM_EOF
       
         trap - INT TERM
       
-        log_both "Updated to version $version"
+        log_both "Update complete: version $version"
         return 0
       }
       
@@ -570,6 +571,23 @@ SHIM_EOF
             exit 0
             ;;
         esac
+      }
+      
+      # === Informational Invocations ===
+      #
+      # Quick, read-only commands the user does not expect to trigger an update:
+      # `--version`, `--help`/`-h`, and `--gateway-status`. For these we deliberately
+      # skip applying a staged pending update so the *currently installed* version
+      # answers (JUNIE-3065). The pending update stays staged and is applied on the
+      # next normal run.
+      is_informational_invocation() {
+        local arg
+        for arg in "$@"; do
+          case "$arg" in
+            --version|--help|-h|--gateway-status) return 0 ;;
+          esac
+        done
+        return 1
       }
       
       # === Channel Switching (one-shot) ===
@@ -712,14 +730,88 @@ SHIM_EOF
         exec "$binary" ${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}
       }
       
+      # === Manual Update (`junie update`) ===
+      #
+      # `junie update` (JUNIE-2899) downloads and *persistently* installs the latest
+      # build of the target channel from the shell, without ever launching the binary
+      # or its AutoUpdateService. It reuses the shim's installer machinery: it shells
+      # out to the channel's published installer in its normal (non-one-shot) mode, so
+      # the installer updates $VERSIONS_DIR/<v>, flips the `current` pointer, and
+      # refreshes this shim on disk -- a real, persistent update.
+      #
+      # Channel defaults to `release` and is overridable via the existing channel
+      # flags (`--eap` / `--nightly` / `--experimental` / `--channel=<name>`), which
+      # are read by detect_channel_flag before this runs.
+      
+      # True when the first positional (non-flag) argument is the token `update`.
+      detect_update_command() {
+        local arg
+        for arg in "$@"; do
+          case "$arg" in
+            -*) continue ;;      # channel/other flags may precede the verb
+            update) return 0 ;;
+            *) return 1 ;;       # any other leading positional is not the update verb
+          esac
+        done
+        return 1
+      }
+      
+      # Download and persistently install the latest build of $REQUESTED_CHANNEL
+      # (default `release`), printing clear progress stages to stderr, then exit.
+      # On any failure the current installation is left untouched.
+      run_manual_update() {
+        local channel="${REQUESTED_CHANNEL:-release}"
+        [[ -n "$channel" ]] || channel="release"
+      
+        if ! is_known_channel "$channel"; then
+          log_both "Error: Unknown channel '$channel' (known: $KNOWN_CHANNELS)"
+          exit 1
+        fi
+        if ! has_command curl; then
+          log_both "Error: 'curl' is required to update Junie"
+          exit 1
+        fi
+      
+        local url
+        url="$(installer_url_for_channel "$channel")"
+      
+        log_both "Checking for the latest '$channel' version..."
+        log_both "Downloading and installing Junie ($channel)..."
+      
+        # Make the data dir visible to the installer.
+        export JUNIE_DATA="$JUNIE_DATA"
+      
+        # Persistent install: NOT one-shot, so the installer updates versions/<v>,
+        # flips the `current` pointer, and refreshes this shim on disk. Its own
+        # `[Junie] ...` progress lines stream straight through to the user.
+        if ! curl -fsSL "$url" | bash; then
+          log_both "Error: Failed to update Junie ('$channel'); current installation left untouched"
+          exit 1
+        fi
+      
+        log_both "Update complete."
+        exit 0
+      }
+      
       # === Main ===
       main() {
         # Handle shim-specific commands
         handle_shim_commands "$@"
       
+        # Detect a channel flag once; used by both the manual-update verb and the
+        # channel one-shot below.
+        detect_channel_flag "$@"
+      
+        # Manual update verb (`junie update [--channel]`): download and persistently
+        # install the latest build of the target channel, then exit. The `update`
+        # token and its channel flags are consumed here and never forwarded to the
+        # binary.
+        if detect_update_command "$@"; then
+          run_manual_update
+        fi
+      
         # Channel one-shot (`junie --eap` etc.): launch another channel's latest build
         # for this run only, leaving the default channel and its pending updates alone.
-        detect_channel_flag "$@"
         if [[ -n "$REQUESTED_CHANNEL" ]]; then
           run_channel_oneshot "$@"
         fi
@@ -730,7 +822,14 @@ SHIM_EOF
       
         # Apply pending update if present. On failure we deliberately do NOT abort:
         # the previous version is still on disk (via the `current` symlink) and should run.
-        if ! apply_pending_update; then
+        #
+        # Informational invocations (`--version`, `--help`/`-h`, `--gateway-status`)
+        # deliberately SKIP applying a staged update so the currently installed
+        # version answers them (JUNIE-3065). The pending update stays staged for the
+        # next normal run.
+        if is_informational_invocation "$@"; then
+          log_upgrade "skip apply: informational invocation ($*)"
+        elif ! apply_pending_update; then
           log "Update not applied; continuing with current version"
         fi
       

@@ -1,9 +1,9 @@
 class Junie < Formula
   desc "Junie CLI"
   homepage "https://www.jetbrains.com/junie"
-  url "https://github.com/JetBrains/junie/releases/download/2383.10/junie-release-2383.10-macos-aarch64.zip"
-  sha256 "e7eccdc74046963eee1628ec6ff0952645c0bc79554bbbb22c614347d95cf7db"
-  version "2383.10"
+  url "https://github.com/JetBrains/junie/releases/download/2470.4/junie-release-2470.4-macos-aarch64.zip"
+  sha256 "2b0c86dad5402d89a2a9931c0d018e7ceea246a037412a503601931cd353209b"
+  version "2470.4"
   license "https://jb.gg/junie-tos-eap"
 
   def install
@@ -512,18 +512,9 @@ SHIM_EOF
       filter_args() {
         FILTERED_ARGS=()
         for arg in "$@"; do
-          local skip="" c
+          local skip=""
           case "$arg" in
-            --use-version=*|--channel=*) skip=1 ;;                # Skip shim-specific flags
-            --*)
-              # Skip bareword channel flags (--eap, --nightly, ...), data-driven.
-              for c in $KNOWN_CHANNELS; do
-                if [[ "$arg" == "--$c" ]]; then
-                  skip=1
-                  break
-                fi
-              done
-              ;;
+            --use-version=*|--channel=*|--release|--eap|--nightly|--experimental) skip=1 ;;
           esac
           [[ -n "$skip" ]] && continue
           FILTERED_ARGS+=("$arg")
@@ -592,7 +583,7 @@ SHIM_EOF
       
       # === Channel Switching (one-shot) ===
       #
-      # `junie --eap` (also --nightly / --release / --experimental, or --channel=<name>)
+      # `junie --channel=<name>`
       # fetches and launches the latest build of another channel *for this run only*.
       # It shells out to that channel's published installer in one-shot mode
       # (JUNIE_ONESHOT=1), which installs the build under $VERSIONS_DIR WITHOUT
@@ -603,30 +594,30 @@ SHIM_EOF
       REQUESTED_CHANNEL=""
       CHANNEL_VERSION=""
       
-      # Scan args for a channel flag, setting REQUESTED_CHANNEL (last one wins).
-      # Both forms are derived from KNOWN_CHANNELS: bareword `--<channel>` and the
-      # explicit `--channel=<name>`.
+      warn_legacy_channel_flags() {
+        local arg channel
+        for arg in "$@"; do
+          case "$arg" in
+            --release|--eap|--nightly|--experimental)
+              channel="${arg#--}"
+              log_both "Warning: '$arg' is no longer supported; use '--channel=$channel' instead"
+              ;;
+          esac
+        done
+      }
+      
+      # Scan args for `--channel=<name>`, setting REQUESTED_CHANNEL (last one wins).
       detect_channel_flag() {
         REQUESTED_CHANNEL=""
-        local arg c
+        local arg
         for arg in "$@"; do
           case "$arg" in
             --channel=*)
               REQUESTED_CHANNEL="${arg#--channel=}"
               ;;
-            --*)
-              for c in $KNOWN_CHANNELS; do
-                if [[ "$arg" == "--$c" ]]; then
-                  REQUESTED_CHANNEL="$c"
-                  break
-                fi
-              done
-              ;;
           esac
         done
-        # Always succeed: the loop's last command is a `[[ ]]` test that returns 1 for
-        # any non-channel arg (e.g. `--help`). Since this function is called as a bare
-        # command under `set -e`, that stray exit status would abort the whole shim.
+        # Always succeed so unrelated arguments cannot abort the shim under `set -e`.
         return 0
       }
       
@@ -645,6 +636,30 @@ SHIM_EOF
         else
           echo "$INSTALL_BASE_URL/install-$c.sh"
         fi
+      }
+      
+      resolve_current_channel() {
+        local channel_file="$CURRENT_LINK/channel" channel
+      
+        if [[ ! -e "$channel_file" ]]; then
+          printf '%s\n' "release"
+          return 0
+        fi
+        if [[ ! -f "$channel_file" || ! -r "$channel_file" ]]; then
+          log_both "Warning: Could not read channel metadata at '$channel_file'; using 'release'"
+          printf '%s\n' "release"
+          return 0
+        fi
+      
+        for channel in $KNOWN_CHANNELS; do
+          if cmp -s "$channel_file" <(printf '%s\n' "$channel"); then
+            printf '%s\n' "$channel"
+            return 0
+          fi
+        done
+      
+        log_both "Warning: Invalid channel metadata at '$channel_file'; using 'release'"
+        printf '%s\n' "release"
       }
       
       # Install (if needed) a build of channel $1 and set CHANNEL_VERSION to the
@@ -739,18 +754,18 @@ SHIM_EOF
       # the installer updates $VERSIONS_DIR/<v>, flips the `current` pointer, and
       # refreshes this shim on disk -- a real, persistent update.
       #
-      # Channel defaults to `release` and is overridable via the existing channel
-      # flags (`--eap` / `--nightly` / `--experimental` / `--channel=<name>`), which
-      # are read by detect_channel_flag before this runs.
+      # Channel comes from the package selected by `current` and is overridable via
+      # `--channel=<name>`, which is read by detect_channel_flag before this runs.
       
-      # True when the first positional (non-flag) argument is the token `update`.
+      # True when `update` is first, optionally preceded by a channel flag. Deprecated
+      # channel flags are ignored after their migration warning and do not select a channel.
       detect_update_command() {
         local arg
         for arg in "$@"; do
           case "$arg" in
-            -*) continue ;;      # channel/other flags may precede the verb
+            --channel=*|--release|--eap|--nightly|--experimental) continue ;;
             update) return 0 ;;
-            *) return 1 ;;       # any other leading positional is not the update verb
+            *) return 1 ;;
           esac
         done
         return 1
@@ -760,8 +775,12 @@ SHIM_EOF
       # (default `release`), printing clear progress stages to stderr, then exit.
       # On any failure the current installation is left untouched.
       run_manual_update() {
-        local channel="${REQUESTED_CHANNEL:-release}"
-        [[ -n "$channel" ]] || channel="release"
+        local channel
+        if [[ -n "$REQUESTED_CHANNEL" ]]; then
+          channel="$REQUESTED_CHANNEL"
+        else
+          channel="$(resolve_current_channel)"
+        fi
       
         if ! is_known_channel "$channel"; then
           log_both "Error: Unknown channel '$channel' (known: $KNOWN_CHANNELS)"
@@ -798,6 +817,8 @@ SHIM_EOF
         # Handle shim-specific commands
         handle_shim_commands "$@"
       
+        warn_legacy_channel_flags "$@"
+      
         # Detect a channel flag once; used by both the manual-update verb and the
         # channel one-shot below.
         detect_channel_flag "$@"
@@ -810,8 +831,8 @@ SHIM_EOF
           run_manual_update
         fi
       
-        # Channel one-shot (`junie --eap` etc.): launch another channel's latest build
-        # for this run only, leaving the default channel and its pending updates alone.
+        # Channel one-shot (`junie --channel=<name>`): launch another channel's latest
+        # build for this run only, leaving the default channel and pending updates alone.
         if [[ -n "$REQUESTED_CHANNEL" ]]; then
           run_channel_oneshot "$@"
         fi

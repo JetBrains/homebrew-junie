@@ -1,9 +1,9 @@
 class Junie < Formula
   desc "Junie CLI"
   homepage "https://www.jetbrains.com/junie"
-  url "https://github.com/JetBrains/junie/releases/download/2548.5/junie-release-2548.5-macos-aarch64.zip"
-  sha256 "13068199b9bd5d05151cdc6e2b0f14926f58259e0af981c050eb45baeab66664"
-  version "2548.5"
+  url "https://github.com/JetBrains/junie/releases/download/2651.3/junie-release-2651.3-macos-aarch64.zip"
+  sha256 "3ad910f7ba709aa6a5a0810a102d5ce15c9d0327fdd163908445abcd09bfc5fa"
+  version "2651.3"
   license "https://jb.gg/junie-tos-eap"
 
   def install
@@ -515,6 +515,7 @@ SHIM_EOF
           local skip=""
           case "$arg" in
             --use-version=*|--channel=*|--release|--eap|--nightly|--experimental) skip=1 ;;
+            --force|-f) skip=1 ;;
           esac
           [[ -n "$skip" ]] && continue
           FILTERED_ARGS+=("$arg")
@@ -745,27 +746,57 @@ SHIM_EOF
         exec "$binary" ${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}
       }
       
-      # === Manual Update (`junie update`) ===
+      # === Forced Update (`junie update --force`, `junie update -f`) ===
       #
-      # `junie update` (JUNIE-2899) downloads and *persistently* installs the latest
-      # build of the target channel from the shell, without ever launching the binary
-      # or its AutoUpdateService. It reuses the shim's installer machinery: it shells
-      # out to the channel's published installer in its normal (non-one-shot) mode, so
-      # the installer updates $VERSIONS_DIR/<v>, flips the `current` pointer, and
-      # refreshes this shim on disk -- a real, persistent update.
+      # A plain `junie update` is handled by the binary itself (UpdateCommand +
+      # AutoUpdateService): it asks the update service which build is right for this
+      # channel/license/platform, skips a no-op update, and stages a verified archive
+      # that this shim applies on the next launch.
+      #
+      # The shim keeps only the cases the binary cannot serve:
+      #   * `update --force` / `update -f` -- reinstall the latest build of the
+      #     channel without launching the binary (it may be broken);
+      #   * `update --channel=<name>` -- switch the persisted channel, which only the
+      #     channel installer can do.
+      # Both shell out to the channel's published installer in its normal
+      # (non-one-shot) mode, so the installer updates $VERSIONS_DIR/<v>, flips the
+      # `current` pointer, and refreshes this shim on disk -- a real, persistent update.
       #
       # Channel comes from the package selected by `current` and is overridable via
       # `--channel=<name>`, which is read by detect_channel_flag before this runs.
       
-      # True when `update` is first, optionally preceded by a channel flag. Deprecated
-      # channel flags are ignored after their migration warning and do not select a channel.
-      detect_update_command() {
+      # Echo the leading verb: the first token that is neither a channel flag nor a
+      # deprecated channel flag. Deprecated flags are ignored after their migration
+      # warning and do not select a channel.
+      leading_verb() {
         local arg
         for arg in "$@"; do
           case "$arg" in
             --channel=*|--release|--eap|--nightly|--experimental) continue ;;
-            update) return 0 ;;
-            *) return 1 ;;
+            *) printf '%s\n' "$arg"; return 0 ;;
+          esac
+        done
+        printf '\n'
+      }
+      
+      # True when the invocation must be served by the channel installer instead of
+      # being forwarded to the binary.
+      detect_forced_update() {
+        local verb arg
+        verb="$(leading_verb "$@")"
+      
+        if [[ "$verb" != "update" ]]; then
+          return 1
+        fi
+      
+        # `update --channel=<name>` switches the persisted channel via the installer.
+        if [[ -n "$REQUESTED_CHANNEL" ]]; then
+          return 0
+        fi
+      
+        for arg in "$@"; do
+          case "$arg" in
+            --force|-f) return 0 ;;
           esac
         done
         return 1
@@ -794,6 +825,7 @@ SHIM_EOF
         local url
         url="$(installer_url_for_channel "$channel")"
       
+        log_both "Forcing a reinstall of the latest '$channel' build..."
         log_both "Checking for the latest '$channel' version..."
         log_both "Downloading and installing Junie ($channel)..."
       
@@ -823,11 +855,14 @@ SHIM_EOF
         # channel one-shot below.
         detect_channel_flag "$@"
       
-        # Manual update verb (`junie update [--channel]`): download and persistently
-        # install the latest build of the target channel, then exit. The `update`
-        # token and its channel flags are consumed here and never forwarded to the
-        # binary.
-        if detect_update_command "$@"; then
+        # Forced update (`junie update --force|-f`) and channel
+        # switching (`junie update --channel=<name>`): download and persistently
+        # install the latest build of the target channel, then exit. These tokens are
+        # consumed here and never forwarded to the binary.
+        #
+        # A plain `junie update` is NOT handled here: it falls through to the normal
+        # launch path below and is served by the binary's own update command.
+        if detect_forced_update "$@"; then
           run_manual_update
         fi
       
